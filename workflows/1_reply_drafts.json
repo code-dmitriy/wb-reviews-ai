@@ -1,0 +1,445 @@
+{
+  "id": "ReviewReplies001",
+  "name": "MIRA · Черновики ответов на отзывы",
+  "nodes": [
+    {
+      "id": "92ac55f0-ce41-5804-9ee7-5f788a1d7e14",
+      "name": "Описание",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -380
+      ],
+      "parameters": {
+        "content": "## Черновики ответов на отзывы WB\nБерёт неотвеченные отзывы, пишет ответ под каждый отзыв в тоне MIRA и присылает менеджеру в Telegram с кнопками **Опубликовать / Переписать**.\n\n**MODE=demo** — обезличенные демо-отзывы в формате API WB.\n**MODE=wb** — официальный API продавца, нужен токен с доступом «Вопросы и отзывы».",
+        "width": 520,
+        "height": 230,
+        "color": 4
+      }
+    },
+    {
+      "id": "d1f57b67-502c-59f1-8056-1a88957d8699",
+      "name": "Запуск вручную",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "8e926d74-e497-5281-a653-1d8c1b53159a",
+      "name": "Каждые 30 минут",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d8e48719-52d0-5f29-97f2-6f2ae11a1dca",
+      "name": "Боевой режим?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "287c6901-50ed-50f7-a9cd-51bc69fe3c39",
+              "leftValue": "={{ $env.MODE === 'wb' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "085fd92c-eaf8-52e8-ba43-b98c9056f1a9",
+      "name": "WB API: неотвеченные отзывы",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        0
+      ],
+      "parameters": {
+        "url": "https://feedbacks-api.wildberries.ru/api/v1/feedbacks",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "isAnswered",
+              "value": "false"
+            },
+            {
+              "name": "take",
+              "value": "30"
+            },
+            {
+              "name": "skip",
+              "value": "0"
+            },
+            {
+              "name": "order",
+              "value": "dateDesc"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.WB_API_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "2c2f1637-13af-5ab5-99a6-bf4f7f02ae9c",
+      "name": "Демо: отзывы MIRA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// Общие функции для Code-нод n8n. Сборщик (build.py) вставляет этот файл в начало каждой Code-ноды.\n\nconst CATEGORY_ICON = {\n  'пересорт': '🚨', 'брак': '🚨', 'комплектация': '🚨', 'размер': '📏',\n  'цена': '💰', 'доставка': '🚚', 'положительный': '💚', 'другое': '💬',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Отзыв из API WB (или демо-набора) -> плоский объект\nfunction normalizeFeedback(f) {\n  const d = f.productDetails || {};\n  const parts = [f.text, f.pros && `Достоинства: ${f.pros}`, f.cons && `Недостатки: ${f.cons}`].filter(Boolean);\n  return {\n    id: String(f.id),\n    name: f.userName || 'Покупатель',\n    rating: Number(f.productValuation) || 0,\n    text: parts.join('\\n') || '(без текста, только оценка)',\n    product: d.productName || 'Товар',\n    size: d.size || '',\n    color: d.color || '',\n    status: f.orderStatus || '',\n    date: f.createdDate ? new Date(f.createdDate).toLocaleDateString('ru-RU') : '',\n  };\n}\n\n// Текст запроса к модели. Фигурные скобки здесь безопасны: это значение переменной, а не шаблон.\nfunction buildPrompt(r, previousDraft) {\n  let p = `Отзыв покупательницы на Wildberries.\nТовар: ${r.product}\nОценка: ${r.rating} из 5\nИмя: ${r.name}\nРазмер и цвет: ${[r.size, r.color].filter(Boolean).join(', ') || 'не указаны'}\nСтатус заказа: ${r.status || 'не указан'}\nТекст отзыва: «${r.text}»\n`;\n  if (previousDraft) {\n    p += `\nПредыдущий черновик ответа не понравился менеджеру:\n«${previousDraft}»\nНапиши новый вариант: другими словами и с другим акцентом.\n`;\n  }\n  p += `\nВерни строго JSON вида:\n{\"category\": \"размер\", \"urgent\": false, \"team_note\": \"\", \"reply\": \"текст ответа\"}`;\n  return p;\n}\n\n// Достаёт JSON из ответа модели, даже если она обернула его в ```json или добавила текст вокруг\nfunction parseAi(raw) {\n  const text = String(raw ?? '').trim();\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  const body = m ? m[0] : text;\n  let j;\n  try {\n    // модели иногда вставляют в строки настоящие переносы — экранируем их и пробуем ещё раз\n    try { j = JSON.parse(body); } catch (e) { j = JSON.parse(body.replace(/\\r?\\n/g, '\\\\n')); }\n    let reply = String(j.reply || '').trim();\n    // подпись бренда ставим сами, модели иногда её забывают\n    if (reply && !/MIRA[!.]?\\s*$/.test(reply)) reply += '\\nКоманда MIRA';\n    return {\n      category: String(j.category || 'другое').toLowerCase(),\n      urgent: j.urgent === true || j.urgent === 'true',\n      team_note: String(j.team_note || '').trim(),\n      reply,\n    };\n  } catch (e) {\n    return { category: 'другое', urgent: false, team_note: '', reply: text };\n  }\n}\n\n// Карточка отзыва для менеджера в Telegram (HTML)\nfunction buildCard(r, ai, variant) {\n  const stars = '⭐'.repeat(r.rating) + '☆'.repeat(Math.max(0, 5 - r.rating));\n  const icon = CATEGORY_ICON[ai.category] || '💬';\n  const lines = [\n    `${stars} <b>${r.rating}/5</b> · ${icon} ${esc(ai.category)}`,\n    `<b>${esc(r.product)}</b>`,\n    esc([r.size, r.color, r.status].filter(Boolean).join(' · ')),\n    `👤 ${esc(r.name)}${r.date ? ' · ' + esc(r.date) : ''}`,\n    '',\n    `💬 <i>${esc(r.text)}</i>`,\n    '',\n    '✍️ <b>Черновик ответа:</b>',\n    `<blockquote>${esc(ai.reply)}</blockquote>`,\n  ];\n  if (ai.team_note) lines.push('', `⚠️ <b>Команде:</b> ${esc(ai.team_note)}`);\n  if (variant > 1) lines.push('', `🔄 Вариант ${variant}`);\n  lines.push('', `<code>ID: ${esc(r.id)}</code>`);\n  return lines.join('\\n');\n}\n\n// Обратная операция: из текста сообщения (Telegram отдаёт его без HTML) восстанавливаем отзыв и черновик\nfunction parseCard(t) {\n  const lines = t.split('\\n');\n  const between = (a, b) => {\n    const i = t.indexOf(a);\n    if (i < 0) return '';\n    const from = i + a.length;\n    const ends = b.map((x) => t.indexOf(x, from)).filter((x) => x >= 0);\n    return t.slice(from, ends.length ? Math.min(...ends) : undefined).trim();\n  };\n  const [size = '', color = '', status = ''] = (lines[2] || '').split(' · ');\n  const who = (lines[3] || '').replace(/^👤\\s*/, '').split(' · ');\n  const r = {\n    id: (t.match(/ID: (\\S+)\\s*$/) || [])[1] || '',\n    rating: Number((lines[0].match(/(\\d)\\/5/) || [])[1]) || 0,\n    product: lines[1] || '',\n    size, color, status,\n    name: who[0] || 'Покупатель',\n    date: who[1] || '',\n    text: between('\\n\\n💬 ', ['\\n\\n✍️ Черновик ответа:']),\n  };\n  const ai = {\n    category: (lines[0].split(' · ')[1] || '').replace(/^\\S+\\s*/, '') || 'другое',\n    reply: between('Черновик ответа:\\n', ['\\n\\n⚠️ Команде:', '\\n\\n🔄 Вариант', '\\n\\nID:']),\n    team_note: between('⚠️ Команде: ', ['\\n\\n🔄 Вариант', '\\n\\nID:']),\n  };\n  const variant = Number((t.match(/🔄 Вариант (\\d+)/) || [])[1]) || 1;\n  return { r, ai, variant };\n}\n\n// ---\nreturn [{ json: {\"data\": {\"countUnanswered\": 10, \"feedbacks\": [{\"id\": \"demo-01\", \"userName\": \"Анна\", \"productValuation\": 1, \"text\": \"Костюм так и не довелось увидеть и оценить, так как в упаковке лежал черный мужской трикотажный костюм… Даже сотрудник пункта выдачи обалдел от такого, как и я… и я не знаю, чья это была вина-упаковщик криворукий или уже на склад такое мероприятие приехало. Но осадок остался очень неприятный, так как сильно ждала данный костюм…\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-06T14:18:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"XXXL\", \"color\": \"фисташковый\"}}, {\"id\": \"demo-05\", \"userName\": \"Мария\", \"productValuation\": 4, \"text\": \"Костюм не плохой..но цена очень сильно завышена.\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-13T16:42:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000002, \"productName\": \"Костюм спортивный брючный с капюшоном на молнии\", \"brandName\": \"MIRA\", \"size\": \"L\", \"color\": \"красный\"}}, {\"id\": \"demo-06\", \"userName\": \"Ольга\", \"productValuation\": 5, \"text\": \"Не выкупила, так как небыло в комплекте пояса, сотрудник пвз сказала, что отметила как брак, а как там дальше не знаю. Качество отличное, красивый цвет.\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-06T16:53:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"XXL\", \"color\": \"коричневый\"}}, {\"id\": \"demo-07\", \"userName\": \"Татьяна\", \"productValuation\": 5, \"text\": \"Шикарный костюм. Но на 48 размер xl большой. Перезаказала на l. Обидно, что дороже на 1200.\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-09T13:04:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"XL\", \"color\": \"фисташковый\"}}, {\"id\": \"demo-02\", \"userName\": \"Светлана\", \"productValuation\": 1, \"text\": \"Ужасные штрипки на штанинах, вообще не держат, затянуть не получается все распадается. Придется отдавать в ателье, тк длинные без затягивания\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-12T12:52:00Z\", \"orderStatus\": \"Выкупили\", \"productDetails\": {\"nmId\": 100000003, \"productName\": \"С начесом спортивный костюм\", \"brandName\": \"MIRA\", \"size\": \"M\", \"color\": \"темно-синий\"}}, {\"id\": \"demo-09\", \"userName\": \"Юлия\", \"productValuation\": 5, \"text\": \"Нашлепку с рукава отпорола, пришлось повозиться, но следов не осталось. Зато сразу пропал вайб костюма 90х с колхозного рынка\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-11T14:47:00Z\", \"orderStatus\": \"Выкупили\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"XXXXL\", \"color\": \"фисташковый\"}}, {\"id\": \"demo-03\", \"userName\": \"Ксения\", \"productValuation\": 1, \"text\": \"Пошив неплохой, качество плохое за такие деньги не стоит брать\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-11T13:41:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"M\", \"color\": \"графит\"}}, {\"id\": \"demo-04\", \"userName\": \"Дарья\", \"productValuation\": 4, \"text\": \"Не очень удобные\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-14T14:09:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000002, \"productName\": \"Костюм спортивный брючный с капюшоном на молнии\", \"brandName\": \"MIRA\", \"size\": \"XS\", \"color\": \"красный\"}}, {\"id\": \"demo-08\", \"userName\": \"Алина\", \"productValuation\": 5, \"text\": \"Очень красивый костюм. Многим не нравится блеск ткани, а мне, наоборот, кажется, что он добавляет шарма. Долго мучалась, выбирая между двумя размерами: в M хорошо сели брюки, но утонула в пиджаке, а в S - прекрасно смотрелся пиджак, но были в облипку брюки. В результате пришлось отказаться. Костюм однозначно рекомендую\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-12T15:07:00Z\", \"orderStatus\": \"Вернули\", \"productDetails\": {\"nmId\": 100000001, \"productName\": \"Костюм брючный деловой двойка классический\", \"brandName\": \"MIRA\", \"size\": \"S\", \"color\": \"коричнево-серый\"}}, {\"id\": \"demo-10\", \"userName\": \"Вера\", \"productValuation\": 5, \"text\": \"Шикарный костюм, рост 162, вес 55кг, объём бедер 96, подошли и S и M, комфортно и длина подшивать не надо. Ткань хорошая, советую к покупке.\", \"pros\": \"\", \"cons\": \"\", \"createdDate\": \"2026-10-13T08:28:00Z\", \"orderStatus\": \"Отказались\", \"productDetails\": {\"nmId\": 100000002, \"productName\": \"Костюм спортивный брючный с капюшоном на молнии\", \"brandName\": \"MIRA\", \"size\": \"M\", \"color\": \"красный\"}}]}} }];\n"
+      }
+    },
+    {
+      "id": "c3f64053-4827-57c9-a012-d3e572eb584d",
+      "name": "Разбить на отзывы",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        760,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Общие функции для Code-нод n8n. Сборщик (build.py) вставляет этот файл в начало каждой Code-ноды.\n\nconst CATEGORY_ICON = {\n  'пересорт': '🚨', 'брак': '🚨', 'комплектация': '🚨', 'размер': '📏',\n  'цена': '💰', 'доставка': '🚚', 'положительный': '💚', 'другое': '💬',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Отзыв из API WB (или демо-набора) -> плоский объект\nfunction normalizeFeedback(f) {\n  const d = f.productDetails || {};\n  const parts = [f.text, f.pros && `Достоинства: ${f.pros}`, f.cons && `Недостатки: ${f.cons}`].filter(Boolean);\n  return {\n    id: String(f.id),\n    name: f.userName || 'Покупатель',\n    rating: Number(f.productValuation) || 0,\n    text: parts.join('\\n') || '(без текста, только оценка)',\n    product: d.productName || 'Товар',\n    size: d.size || '',\n    color: d.color || '',\n    status: f.orderStatus || '',\n    date: f.createdDate ? new Date(f.createdDate).toLocaleDateString('ru-RU') : '',\n  };\n}\n\n// Текст запроса к модели. Фигурные скобки здесь безопасны: это значение переменной, а не шаблон.\nfunction buildPrompt(r, previousDraft) {\n  let p = `Отзыв покупательницы на Wildberries.\nТовар: ${r.product}\nОценка: ${r.rating} из 5\nИмя: ${r.name}\nРазмер и цвет: ${[r.size, r.color].filter(Boolean).join(', ') || 'не указаны'}\nСтатус заказа: ${r.status || 'не указан'}\nТекст отзыва: «${r.text}»\n`;\n  if (previousDraft) {\n    p += `\nПредыдущий черновик ответа не понравился менеджеру:\n«${previousDraft}»\nНапиши новый вариант: другими словами и с другим акцентом.\n`;\n  }\n  p += `\nВерни строго JSON вида:\n{\"category\": \"размер\", \"urgent\": false, \"team_note\": \"\", \"reply\": \"текст ответа\"}`;\n  return p;\n}\n\n// Достаёт JSON из ответа модели, даже если она обернула его в ```json или добавила текст вокруг\nfunction parseAi(raw) {\n  const text = String(raw ?? '').trim();\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  const body = m ? m[0] : text;\n  let j;\n  try {\n    // модели иногда вставляют в строки настоящие переносы — экранируем их и пробуем ещё раз\n    try { j = JSON.parse(body); } catch (e) { j = JSON.parse(body.replace(/\\r?\\n/g, '\\\\n')); }\n    let reply = String(j.reply || '').trim();\n    // подпись бренда ставим сами, модели иногда её забывают\n    if (reply && !/MIRA[!.]?\\s*$/.test(reply)) reply += '\\nКоманда MIRA';\n    return {\n      category: String(j.category || 'другое').toLowerCase(),\n      urgent: j.urgent === true || j.urgent === 'true',\n      team_note: String(j.team_note || '').trim(),\n      reply,\n    };\n  } catch (e) {\n    return { category: 'другое', urgent: false, team_note: '', reply: text };\n  }\n}\n\n// Карточка отзыва для менеджера в Telegram (HTML)\nfunction buildCard(r, ai, variant) {\n  const stars = '⭐'.repeat(r.rating) + '☆'.repeat(Math.max(0, 5 - r.rating));\n  const icon = CATEGORY_ICON[ai.category] || '💬';\n  const lines = [\n    `${stars} <b>${r.rating}/5</b> · ${icon} ${esc(ai.category)}`,\n    `<b>${esc(r.product)}</b>`,\n    esc([r.size, r.color, r.status].filter(Boolean).join(' · ')),\n    `👤 ${esc(r.name)}${r.date ? ' · ' + esc(r.date) : ''}`,\n    '',\n    `💬 <i>${esc(r.text)}</i>`,\n    '',\n    '✍️ <b>Черновик ответа:</b>',\n    `<blockquote>${esc(ai.reply)}</blockquote>`,\n  ];\n  if (ai.team_note) lines.push('', `⚠️ <b>Команде:</b> ${esc(ai.team_note)}`);\n  if (variant > 1) lines.push('', `🔄 Вариант ${variant}`);\n  lines.push('', `<code>ID: ${esc(r.id)}</code>`);\n  return lines.join('\\n');\n}\n\n// Обратная операция: из текста сообщения (Telegram отдаёт его без HTML) восстанавливаем отзыв и черновик\nfunction parseCard(t) {\n  const lines = t.split('\\n');\n  const between = (a, b) => {\n    const i = t.indexOf(a);\n    if (i < 0) return '';\n    const from = i + a.length;\n    const ends = b.map((x) => t.indexOf(x, from)).filter((x) => x >= 0);\n    return t.slice(from, ends.length ? Math.min(...ends) : undefined).trim();\n  };\n  const [size = '', color = '', status = ''] = (lines[2] || '').split(' · ');\n  const who = (lines[3] || '').replace(/^👤\\s*/, '').split(' · ');\n  const r = {\n    id: (t.match(/ID: (\\S+)\\s*$/) || [])[1] || '',\n    rating: Number((lines[0].match(/(\\d)\\/5/) || [])[1]) || 0,\n    product: lines[1] || '',\n    size, color, status,\n    name: who[0] || 'Покупатель',\n    date: who[1] || '',\n    text: between('\\n\\n💬 ', ['\\n\\n✍️ Черновик ответа:']),\n  };\n  const ai = {\n    category: (lines[0].split(' · ')[1] || '').replace(/^\\S+\\s*/, '') || 'другое',\n    reply: between('Черновик ответа:\\n', ['\\n\\n⚠️ Команде:', '\\n\\n🔄 Вариант', '\\n\\nID:']),\n    team_note: between('⚠️ Команде: ', ['\\n\\n🔄 Вариант', '\\n\\nID:']),\n  };\n  const variant = Number((t.match(/🔄 Вариант (\\d+)/) || [])[1]) || 1;\n  return { r, ai, variant };\n}\n\n// ---\nconst out = [];\nfor (const item of $input.all()) {\n  for (const f of item.json.data?.feedbacks || []) {\n    const r = normalizeFeedback(f);\n    out.push({ json: { ...r, prompt: buildPrompt(r) } });\n  }\n}\nreturn out;\n"
+      }
+    },
+    {
+      "id": "797feaa9-db73-5a83-948c-c2ad0c863e24",
+      "name": "Сколько отзывов",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        980,
+        100
+      ],
+      "parameters": {
+        "maxItems": "={{ Number($env.REVIEWS_LIMIT) || 30 }}"
+      }
+    },
+    {
+      "id": "667eee58-1d8b-5e47-baa2-f0c36c978548",
+      "name": "Ответ в стиле MIRA",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1420,
+        100
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "hasOutputParser": false,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Ты — менеджер по работе с отзывами бренда женской одежды MIRA на Wildberries.\nБренд помогает покупательницам быть яркими и уверенными в себе. Тон — тёплый, живой, уважительный, на «Вы», без канцелярита.\n\nПравила ответа покупательнице:\n1. 2–4 предложения, до 450 символов. Начинай с обращения по имени, если оно есть и это не «Покупатель» или «Anonymous».\n2. Обязательно отреагируй на КОНКРЕТНУЮ деталь из отзыва: размер, рост, ткань, цвет, штрипки, пояс и т.п. Ответ должен быть таким, чтобы его нельзя было приклеить к другому отзыву.\n3. Негатив: признай проблему без оправданий, не обвиняй покупательницу и не требуй фото. Пригласи написать в чат продавца, чтобы решить вопрос. Не обещай денег, компенсаций и сроков.\n4. Пересорт, брак, некомплект: извинись и скажи, что передали информацию на склад и в контроль качества.\n5. Жалоба на цену: не спорь, коротко объясни ценность (ткань, пошив, лекала) и предложи добавить товар в избранное, чтобы не пропустить скидку.\n6. Вопрос размера: дай полезную подсказку на будущее, опираясь на слова самой покупательницы. Этот ответ прочитают другие покупательницы — пусть он им поможет.\n7. Позитив: поблагодари за конкретное, без восторженных штампов. Юмор покупательницы можно поддержать — легко и по-доброму.\n8. Опирайся только на то, что написала покупательница. Не приписывай ей того, чего она не говорила («сел идеально», «понравился цвет»), и не придумывай факты о товаре.\n9. Используй её слова как есть: если она пишет «нашлёпка», не заменяй это другим словом. Не перечисляй размер и цвет из данных заказа, если она сама о них не писала.\n10. Пиши грамотным живым русским языком, как внимательный человек, а не робот. Перед ответом проверь орфографию и согласование слов.\n11. Запрещено: «Ваше мнение очень важно для нас», «станет незаменимой частью гардероба», призыв добавить бренд в избранное в каждом ответе, упоминание конкурентов.\n12. Подпись в конце: «Команда MIRA».\n\nКроме ответа определи:\n- category — одно из: пересорт, брак, комплектация, размер, цена, доставка, положительный, другое;\n- urgent — true для пересорта, брака, некомплекта и любых случаев, когда команде нужно что-то проверить, иначе false;\n- team_note — одно предложение для команды, только если в отзыве есть конкретный сигнал: пересорт, брак, некомплект, повторяющаяся проблема с размером или деталь, которую покупательница переделывала сама (спорола, подшила, заменила). Без догадок. Если такого сигнала нет — пустая строка.\n\nОтвечай только JSON-объектом, без пояснений и без markdown."
+            }
+          ]
+        },
+        "batching": {
+          "batchSize": 1
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 4000
+    },
+    {
+      "id": "9914a75d-11be-5f54-9efa-e117c2b127be",
+      "name": "По одному отзыву",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1180,
+        100
+      ],
+      "parameters": {
+        "options": {}
+      }
+    },
+    {
+      "id": "65a9a915-a55b-5204-94dc-ad23e8f31865",
+      "name": "OpenRouter · Nemotron",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1420,
+        320
+      ],
+      "parameters": {
+        "model": "={{ $env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free' }}",
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 4000
+        }
+      },
+      "credentials": {
+        "openRouterApi": {
+          "id": "brandOpenRouter",
+          "name": "OpenRouter"
+        }
+      }
+    },
+    {
+      "id": "b005b2ad-35b1-5680-8221-d7f348961e30",
+      "name": "Разобрать ответ ИИ",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Общие функции для Code-нод n8n. Сборщик (build.py) вставляет этот файл в начало каждой Code-ноды.\n\nconst CATEGORY_ICON = {\n  'пересорт': '🚨', 'брак': '🚨', 'комплектация': '🚨', 'размер': '📏',\n  'цена': '💰', 'доставка': '🚚', 'положительный': '💚', 'другое': '💬',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Отзыв из API WB (или демо-набора) -> плоский объект\nfunction normalizeFeedback(f) {\n  const d = f.productDetails || {};\n  const parts = [f.text, f.pros && `Достоинства: ${f.pros}`, f.cons && `Недостатки: ${f.cons}`].filter(Boolean);\n  return {\n    id: String(f.id),\n    name: f.userName || 'Покупатель',\n    rating: Number(f.productValuation) || 0,\n    text: parts.join('\\n') || '(без текста, только оценка)',\n    product: d.productName || 'Товар',\n    size: d.size || '',\n    color: d.color || '',\n    status: f.orderStatus || '',\n    date: f.createdDate ? new Date(f.createdDate).toLocaleDateString('ru-RU') : '',\n  };\n}\n\n// Текст запроса к модели. Фигурные скобки здесь безопасны: это значение переменной, а не шаблон.\nfunction buildPrompt(r, previousDraft) {\n  let p = `Отзыв покупательницы на Wildberries.\nТовар: ${r.product}\nОценка: ${r.rating} из 5\nИмя: ${r.name}\nРазмер и цвет: ${[r.size, r.color].filter(Boolean).join(', ') || 'не указаны'}\nСтатус заказа: ${r.status || 'не указан'}\nТекст отзыва: «${r.text}»\n`;\n  if (previousDraft) {\n    p += `\nПредыдущий черновик ответа не понравился менеджеру:\n«${previousDraft}»\nНапиши новый вариант: другими словами и с другим акцентом.\n`;\n  }\n  p += `\nВерни строго JSON вида:\n{\"category\": \"размер\", \"urgent\": false, \"team_note\": \"\", \"reply\": \"текст ответа\"}`;\n  return p;\n}\n\n// Достаёт JSON из ответа модели, даже если она обернула его в ```json или добавила текст вокруг\nfunction parseAi(raw) {\n  const text = String(raw ?? '').trim();\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  const body = m ? m[0] : text;\n  let j;\n  try {\n    // модели иногда вставляют в строки настоящие переносы — экранируем их и пробуем ещё раз\n    try { j = JSON.parse(body); } catch (e) { j = JSON.parse(body.replace(/\\r?\\n/g, '\\\\n')); }\n    let reply = String(j.reply || '').trim();\n    // подпись бренда ставим сами, модели иногда её забывают\n    if (reply && !/MIRA[!.]?\\s*$/.test(reply)) reply += '\\nКоманда MIRA';\n    return {\n      category: String(j.category || 'другое').toLowerCase(),\n      urgent: j.urgent === true || j.urgent === 'true',\n      team_note: String(j.team_note || '').trim(),\n      reply,\n    };\n  } catch (e) {\n    return { category: 'другое', urgent: false, team_note: '', reply: text };\n  }\n}\n\n// Карточка отзыва для менеджера в Telegram (HTML)\nfunction buildCard(r, ai, variant) {\n  const stars = '⭐'.repeat(r.rating) + '☆'.repeat(Math.max(0, 5 - r.rating));\n  const icon = CATEGORY_ICON[ai.category] || '💬';\n  const lines = [\n    `${stars} <b>${r.rating}/5</b> · ${icon} ${esc(ai.category)}`,\n    `<b>${esc(r.product)}</b>`,\n    esc([r.size, r.color, r.status].filter(Boolean).join(' · ')),\n    `👤 ${esc(r.name)}${r.date ? ' · ' + esc(r.date) : ''}`,\n    '',\n    `💬 <i>${esc(r.text)}</i>`,\n    '',\n    '✍️ <b>Черновик ответа:</b>',\n    `<blockquote>${esc(ai.reply)}</blockquote>`,\n  ];\n  if (ai.team_note) lines.push('', `⚠️ <b>Команде:</b> ${esc(ai.team_note)}`);\n  if (variant > 1) lines.push('', `🔄 Вариант ${variant}`);\n  lines.push('', `<code>ID: ${esc(r.id)}</code>`);\n  return lines.join('\\n');\n}\n\n// Обратная операция: из текста сообщения (Telegram отдаёт его без HTML) восстанавливаем отзыв и черновик\nfunction parseCard(t) {\n  const lines = t.split('\\n');\n  const between = (a, b) => {\n    const i = t.indexOf(a);\n    if (i < 0) return '';\n    const from = i + a.length;\n    const ends = b.map((x) => t.indexOf(x, from)).filter((x) => x >= 0);\n    return t.slice(from, ends.length ? Math.min(...ends) : undefined).trim();\n  };\n  const [size = '', color = '', status = ''] = (lines[2] || '').split(' · ');\n  const who = (lines[3] || '').replace(/^👤\\s*/, '').split(' · ');\n  const r = {\n    id: (t.match(/ID: (\\S+)\\s*$/) || [])[1] || '',\n    rating: Number((lines[0].match(/(\\d)\\/5/) || [])[1]) || 0,\n    product: lines[1] || '',\n    size, color, status,\n    name: who[0] || 'Покупатель',\n    date: who[1] || '',\n    text: between('\\n\\n💬 ', ['\\n\\n✍️ Черновик ответа:']),\n  };\n  const ai = {\n    category: (lines[0].split(' · ')[1] || '').replace(/^\\S+\\s*/, '') || 'другое',\n    reply: between('Черновик ответа:\\n', ['\\n\\n⚠️ Команде:', '\\n\\n🔄 Вариант', '\\n\\nID:']),\n    team_note: between('⚠️ Команде: ', ['\\n\\n🔄 Вариант', '\\n\\nID:']),\n  };\n  const variant = Number((t.match(/🔄 Вариант (\\d+)/) || [])[1]) || 1;\n  return { r, ai, variant };\n}\n\n// ---\nconst r = $('Разбить на отзывы').item.json;\nconst ai = parseAi($json.text);\nif (!ai.reply) throw new Error(`Модель вернула пустой ответ на отзыв ${r.id}`);\nreturn { json: { ...r, ...ai, card: buildCard(r, ai, 1) } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "64680339-30e6-529c-bf62-a8cf6b257b31",
+      "name": "Карточка менеджеру",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1940,
+        100
+      ],
+      "parameters": {
+        "chatId": "={{ $env.TG_CHAT_ID }}",
+        "text": "={{ $json.card }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Опубликовать",
+                    "additionalFields": {
+                      "callback_data": "=pub:{{ $json.id }}"
+                    }
+                  },
+                  {
+                    "text": "🔄 Переписать",
+                    "additionalFields": {
+                      "callback_data": "=redo:{{ $json.id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true,
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "brandTelegram01",
+          "name": "Telegram · бот отзывов MIRA"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Запуск вручную": {
+      "main": [
+        [
+          {
+            "node": "Боевой режим?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Каждые 30 минут": {
+      "main": [
+        [
+          {
+            "node": "Боевой режим?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Боевой режим?": {
+      "main": [
+        [
+          {
+            "node": "WB API: неотвеченные отзывы",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Демо: отзывы MIRA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WB API: неотвеченные отзывы": {
+      "main": [
+        [
+          {
+            "node": "Разбить на отзывы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Демо: отзывы MIRA": {
+      "main": [
+        [
+          {
+            "node": "Разбить на отзывы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разбить на отзывы": {
+      "main": [
+        [
+          {
+            "node": "Сколько отзывов",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Сколько отзывов": {
+      "main": [
+        [
+          {
+            "node": "По одному отзыву",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "По одному отзыву": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Ответ в стиле MIRA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter · Nemotron": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Ответ в стиле MIRA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ответ в стиле MIRA": {
+      "main": [
+        [
+          {
+            "node": "Разобрать ответ ИИ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разобрать ответ ИИ": {
+      "main": [
+        [
+          {
+            "node": "Карточка менеджеру",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Карточка менеджеру": {
+      "main": [
+        [
+          {
+            "node": "По одному отзыву",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

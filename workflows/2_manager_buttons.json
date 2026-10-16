@@ -1,0 +1,625 @@
+{
+  "id": "ReviewButtons001",
+  "name": "MIRA · Кнопки менеджера",
+  "nodes": [
+    {
+      "id": "92ac55f0-ce41-5804-9ee7-5f788a1d7e14",
+      "name": "Описание",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -420
+      ],
+      "parameters": {
+        "content": "## Кнопки менеджера\nКаждые 5 секунд спрашивает Telegram, какие кнопки нажали (getUpdates — работает без публичного адреса и вебхуков).\n\n**Опубликовать** → в боевом режиме ответ уходит в WB через API, карточка помечается ✅.\n**Переписать** → модель пишет новый вариант с другим акцентом, карточка обновляется.\n\nНажатия принимаются только из чата TG_CHAT_ID.",
+        "width": 560,
+        "height": 250,
+        "color": 4
+      }
+    },
+    {
+      "id": "44e0b781-5f2b-5d16-940a-c4ce6e8ed13b",
+      "name": "Каждые 5 секунд",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        100
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9264a3ef-ece9-59aa-af58-7215c99596ef",
+      "name": "Настройки",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        100
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-chat",
+              "name": "chatId",
+              "value": "={{ $env.TG_CHAT_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mode",
+              "name": "mode",
+              "value": "={{ $env.MODE || 'demo' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "07f226f4-5a95-5698-8f9e-19eb5f31c630",
+      "name": "Telegram: новые нажатия",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        100
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TG_BOT_TOKEN }}/getUpdates",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "timeout",
+              "value": "0"
+            },
+            {
+              "name": "allowed_updates",
+              "value": "[\"callback_query\"]"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 4000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "e40fbc36-25e9-5be8-a834-91f40bbedce8",
+      "name": "Разобрать нажатия",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Общие функции для Code-нод n8n. Сборщик (build.py) вставляет этот файл в начало каждой Code-ноды.\n\nconst CATEGORY_ICON = {\n  'пересорт': '🚨', 'брак': '🚨', 'комплектация': '🚨', 'размер': '📏',\n  'цена': '💰', 'доставка': '🚚', 'положительный': '💚', 'другое': '💬',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Отзыв из API WB (или демо-набора) -> плоский объект\nfunction normalizeFeedback(f) {\n  const d = f.productDetails || {};\n  const parts = [f.text, f.pros && `Достоинства: ${f.pros}`, f.cons && `Недостатки: ${f.cons}`].filter(Boolean);\n  return {\n    id: String(f.id),\n    name: f.userName || 'Покупатель',\n    rating: Number(f.productValuation) || 0,\n    text: parts.join('\\n') || '(без текста, только оценка)',\n    product: d.productName || 'Товар',\n    size: d.size || '',\n    color: d.color || '',\n    status: f.orderStatus || '',\n    date: f.createdDate ? new Date(f.createdDate).toLocaleDateString('ru-RU') : '',\n  };\n}\n\n// Текст запроса к модели. Фигурные скобки здесь безопасны: это значение переменной, а не шаблон.\nfunction buildPrompt(r, previousDraft) {\n  let p = `Отзыв покупательницы на Wildberries.\nТовар: ${r.product}\nОценка: ${r.rating} из 5\nИмя: ${r.name}\nРазмер и цвет: ${[r.size, r.color].filter(Boolean).join(', ') || 'не указаны'}\nСтатус заказа: ${r.status || 'не указан'}\nТекст отзыва: «${r.text}»\n`;\n  if (previousDraft) {\n    p += `\nПредыдущий черновик ответа не понравился менеджеру:\n«${previousDraft}»\nНапиши новый вариант: другими словами и с другим акцентом.\n`;\n  }\n  p += `\nВерни строго JSON вида:\n{\"category\": \"размер\", \"urgent\": false, \"team_note\": \"\", \"reply\": \"текст ответа\"}`;\n  return p;\n}\n\n// Достаёт JSON из ответа модели, даже если она обернула его в ```json или добавила текст вокруг\nfunction parseAi(raw) {\n  const text = String(raw ?? '').trim();\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  const body = m ? m[0] : text;\n  let j;\n  try {\n    // модели иногда вставляют в строки настоящие переносы — экранируем их и пробуем ещё раз\n    try { j = JSON.parse(body); } catch (e) { j = JSON.parse(body.replace(/\\r?\\n/g, '\\\\n')); }\n    let reply = String(j.reply || '').trim();\n    // подпись бренда ставим сами, модели иногда её забывают\n    if (reply && !/MIRA[!.]?\\s*$/.test(reply)) reply += '\\nКоманда MIRA';\n    return {\n      category: String(j.category || 'другое').toLowerCase(),\n      urgent: j.urgent === true || j.urgent === 'true',\n      team_note: String(j.team_note || '').trim(),\n      reply,\n    };\n  } catch (e) {\n    return { category: 'другое', urgent: false, team_note: '', reply: text };\n  }\n}\n\n// Карточка отзыва для менеджера в Telegram (HTML)\nfunction buildCard(r, ai, variant) {\n  const stars = '⭐'.repeat(r.rating) + '☆'.repeat(Math.max(0, 5 - r.rating));\n  const icon = CATEGORY_ICON[ai.category] || '💬';\n  const lines = [\n    `${stars} <b>${r.rating}/5</b> · ${icon} ${esc(ai.category)}`,\n    `<b>${esc(r.product)}</b>`,\n    esc([r.size, r.color, r.status].filter(Boolean).join(' · ')),\n    `👤 ${esc(r.name)}${r.date ? ' · ' + esc(r.date) : ''}`,\n    '',\n    `💬 <i>${esc(r.text)}</i>`,\n    '',\n    '✍️ <b>Черновик ответа:</b>',\n    `<blockquote>${esc(ai.reply)}</blockquote>`,\n  ];\n  if (ai.team_note) lines.push('', `⚠️ <b>Команде:</b> ${esc(ai.team_note)}`);\n  if (variant > 1) lines.push('', `🔄 Вариант ${variant}`);\n  lines.push('', `<code>ID: ${esc(r.id)}</code>`);\n  return lines.join('\\n');\n}\n\n// Обратная операция: из текста сообщения (Telegram отдаёт его без HTML) восстанавливаем отзыв и черновик\nfunction parseCard(t) {\n  const lines = t.split('\\n');\n  const between = (a, b) => {\n    const i = t.indexOf(a);\n    if (i < 0) return '';\n    const from = i + a.length;\n    const ends = b.map((x) => t.indexOf(x, from)).filter((x) => x >= 0);\n    return t.slice(from, ends.length ? Math.min(...ends) : undefined).trim();\n  };\n  const [size = '', color = '', status = ''] = (lines[2] || '').split(' · ');\n  const who = (lines[3] || '').replace(/^👤\\s*/, '').split(' · ');\n  const r = {\n    id: (t.match(/ID: (\\S+)\\s*$/) || [])[1] || '',\n    rating: Number((lines[0].match(/(\\d)\\/5/) || [])[1]) || 0,\n    product: lines[1] || '',\n    size, color, status,\n    name: who[0] || 'Покупатель',\n    date: who[1] || '',\n    text: between('\\n\\n💬 ', ['\\n\\n✍️ Черновик ответа:']),\n  };\n  const ai = {\n    category: (lines[0].split(' · ')[1] || '').replace(/^\\S+\\s*/, '') || 'другое',\n    reply: between('Черновик ответа:\\n', ['\\n\\n⚠️ Команде:', '\\n\\n🔄 Вариант', '\\n\\nID:']),\n    team_note: between('⚠️ Команде: ', ['\\n\\n🔄 Вариант', '\\n\\nID:']),\n  };\n  const variant = Number((t.match(/🔄 Вариант (\\d+)/) || [])[1]) || 1;\n  return { r, ai, variant };\n}\n\n// ---\nconst updates = $input.first().json.result || [];\nif (!updates.length) return [];\nconst offset = updates[updates.length - 1].update_id + 1;\nconst cfg = $('Настройки').first().json;\nconst allowedChat = String(cfg.chatId);\nconst out = [];\nfor (const u of updates) {\n  const q = u.callback_query;\n  if (!q || String(q.message?.chat?.id) !== allowedChat) continue;\n  const [action] = String(q.data || '').split(':');\n  const { r, ai, variant } = parseCard(q.message.text || '');\n  const now = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });\n  const mode = cfg.mode === 'wb' ? 'отправлено в WB' : 'демо-режим, в боевом уходит в WB по API';\n  out.push({ json: {\n    action, offset, r, ai, variant,\n    queryId: q.id, chatId: q.message.chat.id, messageId: q.message.message_id,\n    doneCard: buildCard(r, ai, variant).replace(/\\n\\n<code>ID:/, `\\n\\n✅ <b>Опубликовано</b> · ${now} (${mode})\\n\\n<code>ID:`),\n    redoPrompt: buildPrompt(r, ai.reply),\n  }});\n}\nreturn out.length ? out : [{ json: { action: 'skip', offset } }];\n"
+      }
+    },
+    {
+      "id": "6da7bea4-c6c4-507a-a9e7-73cbc9ab7f05",
+      "name": "Telegram: отметить прочитанным",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        -100
+      ],
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TG_BOT_TOKEN }}/getUpdates",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "offset",
+              "value": "={{ $json.offset }}"
+            },
+            {
+              "name": "timeout",
+              "value": "0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 4000
+        }
+      },
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "6cf2434b-c35b-5ce8-915d-db128d4dc381",
+      "name": "Что нажали?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        840,
+        160
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c0f9cd5c-b109-47c1-85c6-bdf7293b47e5",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "pub",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Опубликовать"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3079c625-7835-48ac-965d-b35307de9bc1",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "redo",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Переписать"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c5752dc8-2aac-5b4c-a3b3-f44320b71983",
+      "name": "Ок: публикую",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        40
+      ],
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.queryId }}",
+        "additionalFields": {
+          "text": "Публикую ответ…"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "brandTelegram01",
+          "name": "Telegram · бот отзывов MIRA"
+        }
+      }
+    },
+    {
+      "id": "d8e48719-52d0-5f29-97f2-6f2ae11a1dca",
+      "name": "Боевой режим?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1180,
+        40
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "287c6901-50ed-50f7-a9cd-51bc69fe3c39",
+              "leftValue": "={{ $env.MODE === 'wb' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0a8084e9-ea1d-53d6-83d6-11dab67f49de",
+      "name": "WB API: опубликовать ответ",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1420,
+        -60
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://feedbacks-api.wildberries.ru/api/v1/feedbacks/answer",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.WB_API_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ id: $('Разобрать нажатия').item.json.r.id, text: $('Разобрать нажатия').item.json.ai.reply }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "11b7d1bb-ee4e-52fe-a851-9ecedf9e557d",
+      "name": "Карточка: опубликовано",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        40
+      ],
+      "parameters": {
+        "operation": "editMessageText",
+        "messageType": "message",
+        "chatId": "={{ $('Разобрать нажатия').item.json.chatId }}",
+        "messageId": "={{ $('Разобрать нажатия').item.json.messageId }}",
+        "text": "={{ $('Разобрать нажатия').item.json.doneCard }}",
+        "replyMarkup": "none",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "brandTelegram01",
+          "name": "Telegram · бот отзывов MIRA"
+        }
+      }
+    },
+    {
+      "id": "9aaae61b-7fb7-566d-8461-d5f205da9fd7",
+      "name": "Ок: переписываю",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.queryId }}",
+        "additionalFields": {
+          "text": "Пишу новый вариант…"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "brandTelegram01",
+          "name": "Telegram · бот отзывов MIRA"
+        }
+      }
+    },
+    {
+      "id": "11939e0a-ba19-5273-bc12-36f5330bb05f",
+      "name": "Новый вариант ответа",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        1180,
+        300
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Разобрать нажатия').item.json.redoPrompt }}",
+        "hasOutputParser": false,
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "Ты — менеджер по работе с отзывами бренда женской одежды MIRA на Wildberries.\nБренд помогает покупательницам быть яркими и уверенными в себе. Тон — тёплый, живой, уважительный, на «Вы», без канцелярита.\n\nПравила ответа покупательнице:\n1. 2–4 предложения, до 450 символов. Начинай с обращения по имени, если оно есть и это не «Покупатель» или «Anonymous».\n2. Обязательно отреагируй на КОНКРЕТНУЮ деталь из отзыва: размер, рост, ткань, цвет, штрипки, пояс и т.п. Ответ должен быть таким, чтобы его нельзя было приклеить к другому отзыву.\n3. Негатив: признай проблему без оправданий, не обвиняй покупательницу и не требуй фото. Пригласи написать в чат продавца, чтобы решить вопрос. Не обещай денег, компенсаций и сроков.\n4. Пересорт, брак, некомплект: извинись и скажи, что передали информацию на склад и в контроль качества.\n5. Жалоба на цену: не спорь, коротко объясни ценность (ткань, пошив, лекала) и предложи добавить товар в избранное, чтобы не пропустить скидку.\n6. Вопрос размера: дай полезную подсказку на будущее, опираясь на слова самой покупательницы. Этот ответ прочитают другие покупательницы — пусть он им поможет.\n7. Позитив: поблагодари за конкретное, без восторженных штампов. Юмор покупательницы можно поддержать — легко и по-доброму.\n8. Опирайся только на то, что написала покупательница. Не приписывай ей того, чего она не говорила («сел идеально», «понравился цвет»), и не придумывай факты о товаре.\n9. Используй её слова как есть: если она пишет «нашлёпка», не заменяй это другим словом. Не перечисляй размер и цвет из данных заказа, если она сама о них не писала.\n10. Пиши грамотным живым русским языком, как внимательный человек, а не робот. Перед ответом проверь орфографию и согласование слов.\n11. Запрещено: «Ваше мнение очень важно для нас», «станет незаменимой частью гардероба», призыв добавить бренд в избранное в каждом ответе, упоминание конкурентов.\n12. Подпись в конце: «Команда MIRA».\n\nКроме ответа определи:\n- category — одно из: пересорт, брак, комплектация, размер, цена, доставка, положительный, другое;\n- urgent — true для пересорта, брака, некомплекта и любых случаев, когда команде нужно что-то проверить, иначе false;\n- team_note — одно предложение для команды, только если в отзыве есть конкретный сигнал: пересорт, брак, некомплект, повторяющаяся проблема с размером или деталь, которую покупательница переделывала сама (спорола, подшила, заменила). Без догадок. Если такого сигнала нет — пустая строка.\n\nОтвечай только JSON-объектом, без пояснений и без markdown."
+            }
+          ]
+        },
+        "batching": {
+          "batchSize": 1
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 4000
+    },
+    {
+      "id": "758989f7-b752-5e61-ae3e-13a76da053eb",
+      "name": "OpenRouter · Nemotron ",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        1180,
+        520
+      ],
+      "parameters": {
+        "model": "={{ $env.OPENROUTER_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b:free' }}",
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 4000
+        }
+      },
+      "credentials": {
+        "openRouterApi": {
+          "id": "brandOpenRouter",
+          "name": "OpenRouter"
+        }
+      }
+    },
+    {
+      "id": "78371a1b-f62a-583a-9924-051eb764023c",
+      "name": "Собрать новую карточку",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1460,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Общие функции для Code-нод n8n. Сборщик (build.py) вставляет этот файл в начало каждой Code-ноды.\n\nconst CATEGORY_ICON = {\n  'пересорт': '🚨', 'брак': '🚨', 'комплектация': '🚨', 'размер': '📏',\n  'цена': '💰', 'доставка': '🚚', 'положительный': '💚', 'другое': '💬',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Отзыв из API WB (или демо-набора) -> плоский объект\nfunction normalizeFeedback(f) {\n  const d = f.productDetails || {};\n  const parts = [f.text, f.pros && `Достоинства: ${f.pros}`, f.cons && `Недостатки: ${f.cons}`].filter(Boolean);\n  return {\n    id: String(f.id),\n    name: f.userName || 'Покупатель',\n    rating: Number(f.productValuation) || 0,\n    text: parts.join('\\n') || '(без текста, только оценка)',\n    product: d.productName || 'Товар',\n    size: d.size || '',\n    color: d.color || '',\n    status: f.orderStatus || '',\n    date: f.createdDate ? new Date(f.createdDate).toLocaleDateString('ru-RU') : '',\n  };\n}\n\n// Текст запроса к модели. Фигурные скобки здесь безопасны: это значение переменной, а не шаблон.\nfunction buildPrompt(r, previousDraft) {\n  let p = `Отзыв покупательницы на Wildberries.\nТовар: ${r.product}\nОценка: ${r.rating} из 5\nИмя: ${r.name}\nРазмер и цвет: ${[r.size, r.color].filter(Boolean).join(', ') || 'не указаны'}\nСтатус заказа: ${r.status || 'не указан'}\nТекст отзыва: «${r.text}»\n`;\n  if (previousDraft) {\n    p += `\nПредыдущий черновик ответа не понравился менеджеру:\n«${previousDraft}»\nНапиши новый вариант: другими словами и с другим акцентом.\n`;\n  }\n  p += `\nВерни строго JSON вида:\n{\"category\": \"размер\", \"urgent\": false, \"team_note\": \"\", \"reply\": \"текст ответа\"}`;\n  return p;\n}\n\n// Достаёт JSON из ответа модели, даже если она обернула его в ```json или добавила текст вокруг\nfunction parseAi(raw) {\n  const text = String(raw ?? '').trim();\n  const m = text.match(/\\{[\\s\\S]*\\}/);\n  const body = m ? m[0] : text;\n  let j;\n  try {\n    // модели иногда вставляют в строки настоящие переносы — экранируем их и пробуем ещё раз\n    try { j = JSON.parse(body); } catch (e) { j = JSON.parse(body.replace(/\\r?\\n/g, '\\\\n')); }\n    let reply = String(j.reply || '').trim();\n    // подпись бренда ставим сами, модели иногда её забывают\n    if (reply && !/MIRA[!.]?\\s*$/.test(reply)) reply += '\\nКоманда MIRA';\n    return {\n      category: String(j.category || 'другое').toLowerCase(),\n      urgent: j.urgent === true || j.urgent === 'true',\n      team_note: String(j.team_note || '').trim(),\n      reply,\n    };\n  } catch (e) {\n    return { category: 'другое', urgent: false, team_note: '', reply: text };\n  }\n}\n\n// Карточка отзыва для менеджера в Telegram (HTML)\nfunction buildCard(r, ai, variant) {\n  const stars = '⭐'.repeat(r.rating) + '☆'.repeat(Math.max(0, 5 - r.rating));\n  const icon = CATEGORY_ICON[ai.category] || '💬';\n  const lines = [\n    `${stars} <b>${r.rating}/5</b> · ${icon} ${esc(ai.category)}`,\n    `<b>${esc(r.product)}</b>`,\n    esc([r.size, r.color, r.status].filter(Boolean).join(' · ')),\n    `👤 ${esc(r.name)}${r.date ? ' · ' + esc(r.date) : ''}`,\n    '',\n    `💬 <i>${esc(r.text)}</i>`,\n    '',\n    '✍️ <b>Черновик ответа:</b>',\n    `<blockquote>${esc(ai.reply)}</blockquote>`,\n  ];\n  if (ai.team_note) lines.push('', `⚠️ <b>Команде:</b> ${esc(ai.team_note)}`);\n  if (variant > 1) lines.push('', `🔄 Вариант ${variant}`);\n  lines.push('', `<code>ID: ${esc(r.id)}</code>`);\n  return lines.join('\\n');\n}\n\n// Обратная операция: из текста сообщения (Telegram отдаёт его без HTML) восстанавливаем отзыв и черновик\nfunction parseCard(t) {\n  const lines = t.split('\\n');\n  const between = (a, b) => {\n    const i = t.indexOf(a);\n    if (i < 0) return '';\n    const from = i + a.length;\n    const ends = b.map((x) => t.indexOf(x, from)).filter((x) => x >= 0);\n    return t.slice(from, ends.length ? Math.min(...ends) : undefined).trim();\n  };\n  const [size = '', color = '', status = ''] = (lines[2] || '').split(' · ');\n  const who = (lines[3] || '').replace(/^👤\\s*/, '').split(' · ');\n  const r = {\n    id: (t.match(/ID: (\\S+)\\s*$/) || [])[1] || '',\n    rating: Number((lines[0].match(/(\\d)\\/5/) || [])[1]) || 0,\n    product: lines[1] || '',\n    size, color, status,\n    name: who[0] || 'Покупатель',\n    date: who[1] || '',\n    text: between('\\n\\n💬 ', ['\\n\\n✍️ Черновик ответа:']),\n  };\n  const ai = {\n    category: (lines[0].split(' · ')[1] || '').replace(/^\\S+\\s*/, '') || 'другое',\n    reply: between('Черновик ответа:\\n', ['\\n\\n⚠️ Команде:', '\\n\\n🔄 Вариант', '\\n\\nID:']),\n    team_note: between('⚠️ Команде: ', ['\\n\\n🔄 Вариант', '\\n\\nID:']),\n  };\n  const variant = Number((t.match(/🔄 Вариант (\\d+)/) || [])[1]) || 1;\n  return { r, ai, variant };\n}\n\n// ---\nconst p = $('Разобрать нажатия').item.json;\nconst ai = parseAi($json.text);\nif (!ai.reply) throw new Error('Модель вернула пустой ответ');\nreturn { json: { card: buildCard(p.r, ai, p.variant + 1) } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "a7565b25-dd65-57a4-8882-deb7ab8810ea",
+      "name": "Карточка: новый вариант",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        300
+      ],
+      "parameters": {
+        "operation": "editMessageText",
+        "messageType": "message",
+        "chatId": "={{ $('Разобрать нажатия').item.json.chatId }}",
+        "messageId": "={{ $('Разобрать нажатия').item.json.messageId }}",
+        "text": "={{ $json.card }}",
+        "replyMarkup": "inlineKeyboard",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        },
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Опубликовать",
+                    "additionalFields": {
+                      "callback_data": "=pub:{{ $('Разобрать нажатия').item.json.r.id }}"
+                    }
+                  },
+                  {
+                    "text": "🔄 Переписать",
+                    "additionalFields": {
+                      "callback_data": "=redo:{{ $('Разобрать нажатия').item.json.r.id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "brandTelegram01",
+          "name": "Telegram · бот отзывов MIRA"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Каждые 5 секунд": {
+      "main": [
+        [
+          {
+            "node": "Настройки",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Настройки": {
+      "main": [
+        [
+          {
+            "node": "Telegram: новые нажатия",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: новые нажатия": {
+      "main": [
+        [
+          {
+            "node": "Разобрать нажатия",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Разобрать нажатия": {
+      "main": [
+        [
+          {
+            "node": "Telegram: отметить прочитанным",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Что нажали?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Что нажали?": {
+      "main": [
+        [
+          {
+            "node": "Ок: публикую",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ок: переписываю",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ок: публикую": {
+      "main": [
+        [
+          {
+            "node": "Боевой режим?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Боевой режим?": {
+      "main": [
+        [
+          {
+            "node": "WB API: опубликовать ответ",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Карточка: опубликовано",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WB API: опубликовать ответ": {
+      "main": [
+        [
+          {
+            "node": "Карточка: опубликовано",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ок: переписываю": {
+      "main": [
+        [
+          {
+            "node": "Новый вариант ответа",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter · Nemotron ": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Новый вариант ответа",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Новый вариант ответа": {
+      "main": [
+        [
+          {
+            "node": "Собрать новую карточку",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Собрать новую карточку": {
+      "main": [
+        [
+          {
+            "node": "Карточка: новый вариант",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "active": false,
+  "tags": []
+}
